@@ -5,7 +5,7 @@ from collections import defaultdict
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy import table
-from sherpa.data import Data1DInt, Data1D
+from sherpa.astro.data import DataPHA
 from sherpa.models.basic import Gauss1D, PowLaw1D
 from sherpa.stats import Chi2Gehrels, Cash
 from sherpa.optmethods import LevMar, NelderMead
@@ -13,41 +13,14 @@ from sherpa.estmethods import Confidence
 from sherpa.fit import Fit
 from sherpa.plot import FitPlot
 
-
-def phahist(evt, conf, binfac=1):
-    '''Bin evt table in PHA space for fitting
+from sherpa.models.model import BinaryOpModel
 
 
-    Parameters
-    ----------
-    evt : `astropy.table.Table`
-        evt table. Could be the full observation or just a tile.
-    conf : dict or `astropy.table.Row`
-        Sets the lower and upper coundaries of the histrogram from
-        `conf['low']` and `conf['hi']`
-    binfac : integer
-        Set the bin size. Only equal sized bins are supported here, any more
-        complex binning (e.g. on to x counts per bin) should be performed
-        using sherpa functions on the returned Data1D objects.
-
-    Returns
-    -------
-    data : `sherpa.data.Data1D`
-        Histrogram as sherpa data object. I'm not using the DataPHA object
-        here because I don't have a need to that yet, but that's something
-        to consider.
-
-    Note
-    ----
-    All but last bin is half-open.
-    If we start on integer numbers, last bin will have more counts,
-     e.g. for binfac=1
-    [1, 2), [2, 3), [3, 4] so last bin would include pha=3 and pha=4,
-     which is too much/
-    '''
-    hist, bin_edges = np.histogram(evt['pha'], bins=np.arange(conf['low'] - 0.5, conf['hi'], binfac))
-    return Data1D('reg1', 0.5 * (bin_edges[:-1] + bin_edges[1:]), hist)
-
+def flatten_sherpa_model(m):
+    if type(m) is BinaryOpModel:
+        return flatten_sherpa_model(m.lhs) + flatten_sherpa_model(m.rhs)
+    else:
+        return [m]
 
 def single_gauss(data, conf):
     '''Initialize sherpa model of Gauss plus powerlaw
@@ -74,21 +47,23 @@ def single_gauss(data, conf):
     g = Gauss1D()
     p = PowLaw1D()
 
+    x = data.get_indep(filter=True)[0]
+    y = data.get_dep(filter=True)
     # Set up starting values that will be close to final results.
     # That is important for numerical stability, and also for speed.
     g.pos = conf['gpos']
     g.pos.max = conf['gpos'] + 100
     g.pos.min = conf['gpos'] - 100
-    g.ampl = data.y[np.argmin(np.abs(data.x - g.pos.val))]
+    g.ampl = y[np.argmin(np.abs(x - g.pos.val))]
     #g.fwhm.max = 100
     #g.fwhm.min = 30
     g.fwhm = conf['fwhm']
     g.fwhm.frozen = True
     g.ampl.min = 0
 
-    p.ref = data.x[0]
+    p.ref = x[0]
     p.gamma = conf['pgamma']
-    p.ampl = data.y[0]
+    p.ampl = y[0]
 
     return p + g, [p, g]
 
@@ -132,7 +107,7 @@ def fit_tile(d, fitstartrow, init_model, stat, method, errors=False,
 
     Parameters
     ----------
-    d : `sherpa.data.Data1D`
+    d : `sherpa.astro.data.DataPHA`
         Data for one tile
     fitstartrow : `dict` or `atropy.table.Row`
         Specification of start values for fit (element, pos, fwhm etc.)
@@ -157,7 +132,9 @@ def fit_tile(d, fitstartrow, init_model, stat, method, errors=False,
         Error results object that contains the estimated errors on the
         gaussian position. If not error estimation was run, ``None``.
     '''
-    if d.y.sum() >= min_counts:
+    d.notice(None, None)
+    d.notice(fitstartrow['low'], fitstartrow['hi'])
+    if d.get_dep(filter=True).sum() >= min_counts:
         model, comp = init_model[fitstartrow['element']](d, fitstartrow)
         gfit = Fit(d, model, stat=stat, method=method)
         gfit.fit()
@@ -170,7 +147,7 @@ def fit_tile(d, fitstartrow, init_model, stat, method, errors=False,
         return None, None
 
 
-def fit_allelem(tab, fitstart, *args, **kwargs):
+def fit_allelem(d, fitstart, *args, **kwargs):
     '''Run fits for one tile for all elements
 
     This routine loops over all elements. For each element,
@@ -179,18 +156,23 @@ def fit_allelem(tab, fitstart, *args, **kwargs):
 
     Parameters
     ----------
-    tab : `astropy.table.Table`
-        event list for one region (tile or full chip)
+    d : `sherpa.astro.data.DataPHA`
+        Data for one tile
     fitstart : `astropy.table.Table`
         Table with stargin values for each element
     args, kwargs :
-        All other parameters are passed ot ``fit_tile``
+        All other parameters are passed to ``fit_tile``
+
+    Returns
+    -------
+    fit_res : list
+        List of sherpa fit result objects
+    fit_err : list
+        List of sherpa confidence objects
     '''
     fit_res = []
     fit_err = []
-    conf_results = []
     for i, conf in enumerate(fitstart):
-        d = phahist(tab, conf)
         gfit, err_est = fit_tile(d, conf, *args, **kwargs)
         fit_res.append(gfit)
         fit_err.append(err_est)
@@ -229,7 +211,10 @@ def fit_all(evt, fitstart, *args, **kwargs):
     for i, row in enumerate(loc):
         tile = extract_tile(evt, row)
         for conf in fitstart:
-            d = phahist(tile, conf)
+            hist, edges = np.histogram(tile['pha'],
+                                       bins=np.arange(-0.5,
+                                                      np.max(tile['pha'])))
+            d = DataPHA('reg', np.arange(np.max(tile['pha'])), hist)
             gfit, err_est = fit_tile(d, conf, *args, **kwargs)
             if gfit is not None:
                 # Unfortunately, the Fit object just has list of all parameters,
@@ -274,31 +259,51 @@ def reg2im1024(tab, col):
     return im
 
 
-def plot_allelem(evts, fitstart, fit_res):
+def plot_allelem(d, fitstart, fit_res, fit_err=None):
     '''Plot a grid with fits for Si, S, Ar, Ca, and Fe for a single tile
 
     Parameters
     ----------
-    evts : `astropy.table.Table`
-        Event table (for display of the data)
+    d : `sherpa.astro.data.DataPHA`
+        Data for one tile
     fitstart : `astropy.table.Table`
         Starting values for fit (for binning parameters for histrogram
         and element labels)
     fit_res : list of Sherpa fit results
         for the model to be plotted
+    fit_err : list of Sherpa confidences results or ``None``
+        If not ``None``, then 1 sigma confidence intervals for the
+        position will be marked.
     '''
     fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(12, 8))
     for i, conf in enumerate(fitstart):
         ax = axes.flatten()[i]
-        d = phahist(evts, conf)
-        ax.plot(d.x, d.y, 'ko', label='Data')
-        ax.plot(d.x, fit_res[i].model(d.x), linewidth=2, label='model')
-        ax.set_yscale('log')
+        d.notice(None, None)
+        d.notice(conf['low'], conf['hi'])
+        x, y, yerr, xerr, xlabel, ylabel = d.to_plot()
+        ax.plot(x, y, 'ko', label='Data')
+        ylim = ax.get_ylim()
+        if fit_res[i] is not None:
+            # data could be binned, but we want model in small bins
+            x = np.arange(conf['low'], conf['hi'], .1)
+            ax.plot(x, fit_res[i].model(x), linewidth=2, label='model')
+            for comp in flatten_sherpa_model(fit_res[i].model):
+                ax.plot(x, comp(x), linewidth=2, label='model')
         ax.set_title(conf['element'])
+        ax.set_ylim([0, ylim[1]])
+        ax.set_xlim(conf['low'], conf['hi'])
+        if fit_err is not None:
+            err = fit_err[i]
+            if err is not None:
+                low_bound = conf['low'] if err.parmins[0] is None else \
+                    err.parvals[0] + err.parmins[0]
+                hi_bound = conf['hi'] if err.parmaxes[0] is None else \
+                    err.parvals[0] + err.parmins[0]
+                ax.axvspan(low_bound, hi_bound, alpha=.5)
     for ax in axes[1, :]:
-        ax.set_xlabel('PHA')
+        ax.set_xlabel(xlabel)
     for ax in axes[:, 0]:
-        ax.set_ylabel('counts / bin')
+        ax.set_ylabel(ylabel)
     return fig, axes
 
 
