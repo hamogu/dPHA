@@ -7,11 +7,10 @@ import matplotlib.pyplot as plt
 from astropy import table
 from sherpa.astro.data import DataPHA
 from sherpa.models.basic import Gauss1D, PowLaw1D
-from sherpa.stats import Chi2Gehrels, Cash
+from sherpa.stats import Cash
 from sherpa.optmethods import LevMar, NelderMead
 from sherpa.estmethods import Confidence
 from sherpa.fit import Fit
-from sherpa.plot import FitPlot
 
 from sherpa.models.model import BinaryOpModel
 
@@ -21,6 +20,7 @@ def flatten_sherpa_model(m):
         return flatten_sherpa_model(m.lhs) + flatten_sherpa_model(m.rhs)
     else:
         return [m]
+
 
 def single_gauss(data, conf):
     '''Initialize sherpa model of Gauss plus powerlaw
@@ -309,7 +309,8 @@ def plot_allelem(d, fitstart, fit_res, fit_err=None):
 
 def plot_loc_table(loc, evts, elements,
                    subplotskw={'nrows': 2, 'ncols': 3, 'figsize': (12, 8),
-                               'subplot_kw': {'aspect':'equal'}}):
+                               'subplot_kw': {'aspect': 'equal'},
+                               'gridspec_kw': {'wspace': .5}}):
     '''Plot a grid of PHA images  for Si, S, Ar, Ca, and Fe
 
     Parameters
@@ -330,13 +331,17 @@ def plot_loc_table(loc, evts, elements,
         im = ax.imshow(reg2im1024(loc, elem).T, origin='lower')
         ax.set_title(elem)
         out = plt.colorbar(im, ax=ax)
+        out.set_label('PHA [channel]')
 
     total = np.histogram2d(evts['chipx'], evts['chipy'],
                            bins=[np.arange(0, 1025, 32),
                                  np.arange(0, 1025, 128)])
     im = axes[1, 2].imshow(total[0].T, origin='lower',
-                            extent=[0, 1024, 0, 1024])
+                           extent=[0, 1024, 0, 1024],
+                           cmap=plt.get_cmap('inferno'),
+                           vmin=0)
     cbar = plt.colorbar(im, ax=axes[1, 2])
+    cbar.set_label('counts / bin')
     axes[1, 2].set_title('counts / bin')
     return fig, axes
 
